@@ -277,7 +277,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "doc": doc(),
                 "from": { "type": "integer", "minimum": 1 },
                 "to": { "type": "integer", "minimum": 1 },
-                "style": { "type": "string", "enum": ["decimal", "upper-roman", "lower-roman", "upper-alpha", "lower-alpha", "none"], "description": "Numbering style (default decimal; none = prefix only)." },
+                "style": { "string": "enum", "enum": ["decimal", "upper-roman", "lower-roman", "upper-alpha", "lower-alpha", "none"], "description": "Numbering style (default decimal; none = prefix only)." },
                 "prefix": { "type": "string" },
                 "start": { "type": "integer", "minimum": 1, "description": "Number of the first page in the range (default 1)." },
             }),
@@ -929,6 +929,16 @@ pub fn tools() -> Vec<ToolDef> {
                 }),
                 &["doc"],
             )),
+        t("ocr_highlight_zero_rows", "Highlight zero-score rows", "Scan pages with native OCR, locate student entries with zero scores (e.g. 0/10, points: 0, pts = 0, [A-D]: 0), and add full-width highlight overlays across detected rows. Undoable.")
+            .cmd("ocr.highlight_zero_rows")
+            .with(schema(
+                json!({
+                    "doc": doc(),
+                    "pages": pages("to scan and highlight (default: all)"),
+                    "color": color(),
+                }),
+                &["doc"],
+            )),
         t("ocr_recognize_files", "Recognize text in multiple files", "Scan & OCR ▸ Recognize text ▸ In multiple files: read every page of each PDF in paths and write the searchable result into folder under the same name (pages that already have text are left alone). Returns, per file, the output path, word count and skipped pages, or the error.")
             .cmd("ocr.recognize_batch")
             .with(schema(
@@ -1142,4 +1152,30 @@ pub(crate) fn check_args(def: &ToolDef, args: &Value) -> Result<(), ToolError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ocr_highlight_zero_rows_tool_is_registered() {
+        let tool = find("ocr_highlight_zero_rows").expect("ocr_highlight_zero_rows must exist");
+        assert_eq!(tool.command, Some("ocr.highlight_zero_rows"));
+        assert!(!tool.read_only);
+        assert!(!tool.destructive);
+        assert_eq!(tool_for_command("ocr.highlight_zero_rows"), Some("ocr_highlight_zero_rows"));
+    }
+
+    #[test]
+    fn ocr_highlight_zero_rows_args_validation() {
+        let tool = find("ocr_highlight_zero_rows").unwrap();
+        // Missing 'doc'
+        assert!(check_args(tool, &json!({})).is_err());
+        // Valid args
+        assert!(check_args(tool, &json!({"doc": 1})).is_ok());
+        assert!(check_args(tool, &json!({"doc": 1, "pages": [1, 2], "color": "orange"})).is_ok());
+        // Unknown argument
+        assert!(check_args(tool, &json!({"doc": 1, "unknown_field": true})).is_err());
+    }
 }

@@ -1,7 +1,7 @@
 //! The command registry: every user-facing action, by id (architecture §4, "everything is a
 //! command").
 //!
-//! Menus, keyboard shortcuts, the ⌘K palette and automation (CLI `run`, the control channel and
+//! Menus, keyboard shortcuts, the ⌘K/Alt+P palette and automation (CLI `run`, the control channel and
 //! MCP later) all go through this table. A frontend implements *what* each id does. The registry
 //! says what it is called, where it appears, which key runs it, and when it is enabled, so that
 //! every surface agrees.
@@ -54,6 +54,8 @@ pub struct Shortcut {
     pub shift: bool,
     /// ⌃ on macOS (in addition to ⌘); unused elsewhere.
     pub mac_ctrl: bool,
+    /// ⌥ on macOS, Alt elsewhere.
+    pub alt: bool,
     /// Key name: a letter, a digit, punctuation such as `,`, or `Delete`.
     pub key: &'static str,
 }
@@ -61,12 +63,17 @@ pub struct Shortcut {
 impl Shortcut {
     /// ⌘ (Ctrl elsewhere) and `key`.
     pub const fn cmd(key: &'static str) -> Self {
-        Self { command: true, shift: false, mac_ctrl: false, key }
+        Self { command: true, shift: false, mac_ctrl: false, alt: false, key }
     }
 
     /// ⇧⌘ (Ctrl+Shift elsewhere) and `key`.
     pub const fn cmd_shift(key: &'static str) -> Self {
-        Self { command: true, shift: true, mac_ctrl: false, key }
+        Self { command: true, shift: true, mac_ctrl: false, alt: false, key }
+    }
+
+    /// ⌥ (Alt elsewhere) and `key`.
+    pub const fn alt(key: &'static str) -> Self {
+        Self { command: false, shift: false, mac_ctrl: false, alt: true, key }
     }
 
     /// The command modifier on its own, for text such as "⌘-scroll" / "Ctrl-scroll".
@@ -81,6 +88,9 @@ impl Shortcut {
             if self.mac_ctrl {
                 s.push('⌃');
             }
+            if self.alt {
+                s.push('⌥');
+            }
             if self.shift {
                 s.push('⇧');
             }
@@ -94,6 +104,9 @@ impl Shortcut {
             if self.command || self.mac_ctrl {
                 parts.push("Ctrl");
             }
+            if self.alt {
+                parts.push("Alt");
+            }
             if self.shift {
                 parts.push("Shift");
             }
@@ -104,7 +117,7 @@ impl Shortcut {
 
     /// Number of modifiers (more specific shortcuts are matched first).
     pub fn modifier_count(&self) -> usize {
-        usize::from(self.command) + usize::from(self.shift) + usize::from(self.mac_ctrl)
+        usize::from(self.command) + usize::from(self.shift) + usize::from(self.mac_ctrl) + usize::from(self.alt)
     }
 }
 
@@ -187,7 +200,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     ct("edit.redo", "Redo", EDIT, Some(Shortcut::cmd_shift("Z")), Redo, "redo-2"),
     c("edit.find", "Find…", EDIT, Some(Shortcut::cmd("F")), Document, "search"),
     c("edit.advanced_search", "Advanced search…", EDIT, Some(Shortcut::cmd_shift("F")), Document, "search"),
-    c("view.palette", "Find tools and commands…", VIEW, Some(Shortcut::cmd("K")), Nothing, "search"),
+    c("view.palette", "Find tools and commands…", VIEW, Some(Shortcut::alt("P")), Nothing, "search"),
     // Page display: View ▸ Page display and the rail's button list these as radios, so
     // `menu = None` keeps them out of the generated menus. The palette still runs them.
     c("view.layout.continuous", "Continuous scrolling", None, None, Document, "arrow-up-down"),
@@ -207,7 +220,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     c("edit.column_select", "Column select", EDIT, None, Document, "text-select"),
     c("edit.snapshot", "Take a snapshot", EDIT, None, Document, "camera"),
     c("view.full_screen", "Full screen mode", VIEW, Some(Shortcut::cmd("L")), Document, "maximize"),
-    c("view.read_mode", "Read mode", VIEW, Some(Shortcut { command: true, shift: false, mac_ctrl: true, key: "H" }), Document, "book-open"),
+    c("view.read_mode", "Read mode", VIEW, Some(Shortcut { command: true, shift: false, mac_ctrl: true, alt: false, key: "H" }), Document, "book-open"),
     c("view.focus_page_input", "Go to page…", VIEW, Some(Shortcut::cmd_shift("N")), Document, "text-cursor-input"),
     c("ui.dock.reset", "Reset panel layout", VIEW, None, Nothing, "settings"),
     c("view.theme", "Switch light / dark theme", None, None, Nothing, "moon"),
@@ -309,6 +322,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     c("tools.js_console", "JavaScript console…", None, Some(Shortcut::cmd("J")), Document, "square-terminal"),
     c("tools.document_js", "Document JavaScripts…", None, None, Modification, "file-code"),
     c("ocr.recognize", "Recognize text…", None, None, Modification, "scan-text"),
+    c("ocr.highlight_zero_rows", "Highlight rows with 0 scores…", None, Some(Shortcut::alt("Z")), Modification, "highlighter"),
     c("ocr.recognize_batch", "Recognize text in multiple files…", None, None, Nothing, "files"),
     c("a11y.check", "Check for accessibility…", None, None, Document, "accessibility"),
     c("a11y.report", "Open accessibility report", None, None, Document, "file-text"),
@@ -406,6 +420,22 @@ mod tests {
                 assert!(keys.insert(s), "duplicate shortcut {} ({})", s.label(true), c.id);
             }
         }
+    }
+
+    #[test]
+    fn alt_p_palette_shortcut_registered() {
+        let palette = command("view.palette").expect("view.palette must be registered");
+        let s = palette.shortcut.expect("view.palette must have shortcut");
+        assert_eq!(s.label(false), "Alt+P");
+        assert_eq!(s.label(true), "⌥P");
+    }
+
+    #[test]
+    fn highlight_zero_rows_command_registered() {
+        let hz = command("ocr.highlight_zero_rows").expect("ocr.highlight_zero_rows must be registered");
+        assert_eq!(hz.needs, Needs::Modification);
+        let s = hz.shortcut.expect("ocr.highlight_zero_rows has Alt+Z shortcut");
+        assert_eq!(s.label(false), "Alt+Z");
     }
 
     #[test]
