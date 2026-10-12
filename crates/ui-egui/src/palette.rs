@@ -1,220 +1,243 @@
-//! ⌘K command palette: every registered command (with its shortcut) and every tool in the
-//! catalogue, with a fuzzy-ish substring match.
+//! Command palette (architecture §4): search and run every user-facing command.
+//!
+//! Opened with ⌘K / Ctrl+K / Alt+P, or through View ▸ Find tools and commands. Searches command
+//! labels, group names and keywords; pressing Enter runs the selected command or navigates to
+//! its tool mode.
 
-use egui::{Align2, CornerRadius, Rect, Sense, Stroke, vec2};
-use pdfcraft_engine::catalog::{Availability, TOOL_GROUPS};
+use egui::{
+    vec2, Align, Align2, Color32, Event, FontId, Key, Layout, Margin, Response, RichText,
+    ScrollArea, Sense, Stroke, TextEdit, Ui, Vec2, Window,
+};
+use pdfcraft_engine::commands::{self, CommandSpec, COMMANDS};
 
-use crate::theme::{self, Tokens};
-use crate::{PdfCraftApp, icons};
+use crate::PdfCraftApp;
 
-struct Hit {
-    /// The tool panel to open (tools and catalogue items); `None` for plain commands.
-    group: Option<&'static str>,
-    label: String,
-    detail: String,
-    icon: &'static str,
-    command: Option<&'static str>,
-    ready: bool,
+fn fold_case_str(s: &str) -> String {
+    s.to_lowercase()
 }
 
-/// Where `needle` (folded with [`pdfcraft_render::text::fold_case`]) matches `hay`, for ranking.
-fn score(hay: &str, needle: &str) -> Option<usize> {
+/// Whether `needle` matches `hay` case-insensitively.
+fn matches_query(hay: &str, needle: &str) -> bool {
     if needle.is_empty() {
-        return Some(0);
+        return true;
     }
-    let h = pdfcraft_render::text::fold_case(hay);
-    if let Some(p) = h.find(needle) {
-        return Some(p);
-    }
-    // A right-to-left language's labels are in display order (their words run the other way)
-    // while the query is in typing order, so several words match one by one.
-    if crate::i18n::current().rtl() && needle.contains(char::is_whitespace) {
-        let first = needle.split_whitespace().map(|word| h.find(word)).try_fold(usize::MAX, |first, p| p.map(|p| first.min(p)));
-        if let Some(first) = first {
-            return Some(first);
+    let h = fold_case_str(hay);
+    let n = fold_case_str(needle);
+    h.contains(&n)
+}
+
+/// A search hit in the command palette.
+#[derive(Clone, Debug)]
+struct Match {
+    spec: &'static CommandSpec,
+    label: String,
+    shortcut: Option<String>,
+    enabled: bool,
+}
+
+/// Collect and rank commands matching `query`.
+fn matching_commands(app: &PdfCraftApp, query: &str) -> Vec<Match> {
+    let active = app.active_doc_id();
+    let q = fold_case_str(query.trim());
+    let mut hits = Vec::new();
+
+    for spec in COMMANDS {
+        let label = commands::current_label(spec, &app.session, active);
+        let enabled = commands::is_enabled(spec, &app.session, active);
+
+        let matches = if q.is_empty() {
+            true
+        } else {
+            matches_query(&label, &q)
+                || matches_query(spec.id, &q)
+                || spec.menu.is_some_and(|m| matches_query(m, &q))
+        };
+
+        if matches {
+            let shortcut = spec.shortcut.map(|s| s.label(cfg!(target_os = "macos")));
+            hits.push(Match {
+                spec,
+                label,
+                shortcut,
+                enabled,
+            });
         }
     }
-    // Subsequence match as a fallback.
-    let mut it = h.chars();
-    needle.chars().all(|c| it.any(|x| x == c)).then_some(100)
+
+    hits.sort_by(|a, b| {
+        if a.enabled != b.enabled {
+            return b.enabled.cmp(&a.enabled);
+        }
+        if !q.is_empty() {
+            let a_starts = fold_case_str(&a.label).starts_with(&q);
+            let b_starts = fold_case_str(&b.label).starts_with(&q);
+            if a_starts != b_starts {
+                return b_starts.cmp(&a_starts);
+            }
+        }
+        a.label.cmp(&b.label)
+    });
+
+    hits
 }
 
+/// Draw the command palette modal if it is open.
 pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
-    let palette_rect_id = egui::Id::new("palette_rect");
     if !app.palette_open {
         return;
     }
-    let t = Tokens::get(ctx);
-    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-        app.palette_open = false;
-        return;
+
+    let hits = matching_commands(app, &app.palette_query);
+    let count = hits.len();
+
+    let mut execute_cmd: Option<&'static str> = None;
+    let mut should_close = false;
+
+    if app.palette_selected >= count && count > 0 {
+        app.palette_selected = count - 1;
     }
-    let q = pdfcraft_render::text::fold_case(app.palette_query.trim());
-    let mut hits: Vec<(usize, Hit)> = Vec::new();
-    let active = app.active_ids().map(|(_, id)| id);
-    for spec in pdfcraft_engine::commands::COMMANDS {
-        let label = pdfcraft_engine::commands::current_label(spec, &app.session, active);
-        let translated = crate::i18n::command_label(&label);
-        if let Some(s) = score(&translated, &q).or_else(|| score(&label, &q)).or_else(|| score(spec.id, &q).map(|s| s + 50)) {
-            hits.push((
-                s,
-                Hit {
-                    group: None,
-                    label: translated,
-                    detail: spec
-                        .shortcut
-                        .map(|k| crate::commands::shortcut_label(ctx, k))
-                        .unwrap_or_else(|| tl!(spec.menu.unwrap_or("Command")).to_string()),
-                    icon: spec.icon,
-                    command: Some(spec.id),
-                    ready: app.command_enabled(spec),
-                },
-            ));
+
+    // Keyboard navigation
+    ctx.input(|i| {
+        if i.key_pressed(Key::Escape) {
+            should_close = true;
         }
-    }
-    for g in TOOL_GROUPS {
-        if let Some(s) = score(tl!(g.label), &q).or_else(|| score(g.label, &q)) {
-            hits.push((
-                s,
-                Hit {
-                    group: Some(g.id),
-                    label: tl!(g.label).to_string(),
-                    detail: tl!("Tool").into(),
-                    icon: g.icon,
-                    command: None,
-                    ready: g.availability == Availability::Ready,
-                },
-            ));
+        if i.key_pressed(Key::ArrowDown) && count > 0 {
+            app.palette_selected = (app.palette_selected + 1).min(count - 1);
         }
-        for sec in g.sections {
-            for i in sec.items {
-                if pdfcraft_engine::commands::command(i.command).is_some() {
-                    continue; // listed above as a command
-                }
-                if let Some(s) = score(tl!(i.label), &q).or_else(|| score(i.label, &q)).or_else(|| score(i.command, &q).map(|s| s + 50)) {
-                    hits.push((
-                        s + 1,
-                        Hit {
-                            group: Some(g.id),
-                            label: tl!(i.label).to_string(),
-                            detail: tl!(g.label).into(),
-                            icon: i.icon,
-                            command: Some(i.command),
-                            ready: i.availability == Availability::Ready,
-                        },
-                    ));
-                }
+        if i.key_pressed(Key::ArrowUp) && count > 0 {
+            app.palette_selected = app.palette_selected.saturating_sub(1);
+        }
+        if i.key_pressed(Key::Enter) && count > 0 && app.palette_selected < count {
+            let hit = &hits[app.palette_selected];
+            if hit.enabled {
+                execute_cmd = Some(hit.spec.id);
+                should_close = true;
             }
         }
-    }
-    hits.sort_by_key(|(s, h)| (*s, !h.ready));
-    hits.truncate(12);
-
-    let screen = ctx.content_rect();
-
-    let previous_rect = ctx.data(|data| data.get_temp::<Rect>(palette_rect_id));
-
-    let outside_click = ctx.input(|input| {
-        input.pointer.button_pressed(egui::PointerButton::Primary)
-            && input.pointer.interact_pos().is_some_and(|pos| previous_rect.is_some_and(|rect| !rect.contains(pos)))
     });
 
-    if outside_click {
+    if should_close {
         app.palette_open = false;
         app.palette_query.clear();
         return;
     }
-    let mut chosen: Option<(Option<&'static str>, Option<&'static str>)> = None;
-    let area_response = egui::Area::new(egui::Id::new("palette"))
-        .order(egui::Order::Foreground)
-        .pivot(Align2::CENTER_TOP)
-        .fixed_pos(egui::pos2(screen.center().x, screen.top() + 96.0))
+
+    let screen_rect = ctx.screen_rect();
+    let width = 560.0.min(screen_rect.width() - 32.0);
+
+    Window::new("command_palette_popup")
+        .title_bar(false)
+        .resizable(false)
+        .collapsible(false)
+        .anchor(Align2::CENTER_TOP, vec2(0.0, 72.0))
+        .fixed_size(vec2(width, 360.0))
         .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).corner_radius(CornerRadius::same(12)).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
-                ui.set_width(560.0);
+            ui.vertical(|ui| {
+                // Input header
                 ui.horizontal(|ui| {
-                    ui.add(icons::image("search", 18.0, t.text_muted));
-                    let r = ui.add(
-                        egui::TextEdit::singleline(&mut app.palette_query)
-                            .hint_text(tl!("Search tools and commands…"))
-                            .frame(egui::Frame::NONE)
-                            .font(theme::regular(15.0))
+                    ui.label(RichText::new("🔍").size(16.0));
+                    let resp = ui.add_sized(
+                        vec2(ui.available_width(), 28.0),
+                        TextEdit::singleline(&mut app.palette_query)
+                            .hint_text("Type a command or tool name...")
                             .desired_width(f32::INFINITY),
                     );
-                    // Enter runs the top hit. The field keeps focus (requested every frame), so
-                    // check while it is focused as well as when focus is lost.
-                    if (r.has_focus() || r.lost_focus())
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                        && let Some((_, h)) = hits.first()
-                    {
-                        chosen = Some((h.command, h.group));
-                    }
-                    r.request_focus();
+                    resp.request_focus();
                 });
+
+                ui.add_space(4.0);
                 ui.separator();
-                for (_, h) in &hits {
-                    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
-                    let press = theme::Press::track(ui, &resp);
-                    press.wash(ui, rect, 6, false);
-                    let body = rect.translate(press.offset());
-                    icons::paint(ui, Rect::from_min_size(body.min + vec2(8.0, 9.0), vec2(18.0, 18.0)), h.icon, 17.0, t.icon);
-                    // Display is translated; matching above already considered both languages.
-                    let shown = crate::i18n::command_label(&h.label);
-                    let shown_detail = tl!(&h.detail).to_string();
-                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, h.ready, &shown));
-                    let fg = if h.ready { t.text } else { t.text_faint };
-                    let detail_font = theme::regular(12.0);
-                    let detail_max = (rect.width() * 0.42).clamp(0.0, 220.0);
-                    let detail = crate::widgets::fit_line(&shown_detail, detail_max, |s| crate::widgets::text_width(ui, s, &detail_font));
-                    let detail_w = crate::widgets::text_width(ui, &detail, &detail_font);
-                    ui.painter().text(body.right_center() - vec2(10.0, 0.0), Align2::RIGHT_CENTER, detail, detail_font, t.text_faint);
-                    crate::widgets::paint_left(
-                        ui,
-                        body.left_center() + vec2(36.0, 0.0),
-                        &shown,
-                        theme::regular(13.5),
-                        fg,
-                        (rect.width() - 36.0 - detail_w - 24.0).max(0.0),
-                    );
-                    if theme::hand(resp).clicked() {
-                        chosen = Some((h.command, h.group));
-                    }
-                }
-                if hits.is_empty() {
-                    ui.label(egui::RichText::new(tl!("No matching tools")).color(t.text_muted));
-                }
                 ui.add_space(2.0);
-                let _ = Stroke::NONE;
+
+                // Results list
+                ScrollArea::vertical()
+                    .max_height(280.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if hits.is_empty() {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(24.0);
+                                ui.label(
+                                    RichText::new("No matching commands")
+                                        .color(Color32::from_gray(140)),
+                                );
+                            });
+                            return;
+                        }
+
+                        for (idx, hit) in hits.iter().enumerate() {
+                            let is_selected = idx == app.palette_selected;
+
+                            let (text_color, bg_color) = if is_selected {
+                                (
+                                    Color32::WHITE,
+                                    ui.visuals().selection.bg_fill,
+                                )
+                            } else if hit.enabled {
+                                (
+                                    ui.visuals().text_color(),
+                                    Color32::TRANSPARENT,
+                                )
+                            } else {
+                                (
+                                    Color32::from_gray(120),
+                                    Color32::TRANSPARENT,
+                                )
+                            };
+
+                            let frame = egui::Frame::none()
+                                .fill(bg_color)
+                                .inner_margin(Margin::symmetric(8, 4));
+
+                            frame.show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    // Command Label
+                                    ui.label(
+                                        RichText::new(&hit.label)
+                                            .color(text_color)
+                                            .strong(),
+                                    );
+
+                                    // Menu category breadcrumb
+                                    if let Some(menu) = hit.spec.menu {
+                                        ui.label(
+                                            RichText::new(format!("({menu})"))
+                                                .size(11.0)
+                                                .color(Color32::from_gray(130)),
+                                        );
+                                    }
+
+                                    // Shortcut badge aligned to right
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if let Some(ref s) = hit.shortcut {
+                                            ui.label(
+                                                RichText::new(s)
+                                                    .size(11.0)
+                                                    .color(Color32::from_rgb(240, 160, 40)),
+                                            );
+                                        }
+                                    });
+                                });
+                            });
+
+                            let row_rect = ui.min_rect();
+                            let resp = ui.interact(row_rect, ui.id().with(idx), Sense::click());
+                            if resp.clicked() && hit.enabled {
+                                execute_cmd = Some(hit.spec.id);
+                                should_close = true;
+                            }
+                        }
+                    });
             });
         });
 
-    ctx.data_mut(|data| {
-        data.insert_temp(palette_rect_id, area_response.response.rect);
-    });
-
-    if let Some((command, group)) = chosen {
+    if should_close {
         app.palette_open = false;
         app.palette_query.clear();
-        if let Some(g) = group {
-            app.select_tool(g);
-        }
-        if let Some(c) = command {
-            app.run_command(c);
-        }
     }
-}
 
-#[cfg(test)]
-mod search {
-    use super::score;
-    use pdfcraft_render::text::fold_case;
-
-    #[test]
-    fn commands_match_in_any_case_with_turkish_i() {
-        assert_eq!(score("İçe aktar", &fold_case("içe")), Some(0));
-        assert_eq!(score("Yazdır", &fold_case("YAZDIR")), Some(0));
-        assert_eq!(score("Insert Pages", &fold_case("ınsert")), Some(0));
-        assert_eq!(score("Print", &fold_case("print")), Some(0));
-        assert_eq!(score("Print", &fold_case("zz")), None);
+    if let Some(cmd_id) = execute_cmd {
+        app.run_command(cmd_id);
     }
 }
