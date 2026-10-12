@@ -91,16 +91,13 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
         }
     });
 
-    let screen_rect = ctx.input(|i| i.screen_rect());
-    let width = 560.0_f32.min(screen_rect.width() - 32.0);
-
-    // 5. Draw Modal Window
+    // 5. Draw Modal Window (Fixed Size)
     Window::new("command_palette_modal")
         .title_bar(false)
         .resizable(false)
         .collapsible(false)
         .anchor(Align2::CENTER_TOP, vec2(0.0, 80.0))
-        .fixed_size(vec2(width, 360.0))
+        .fixed_size(vec2(560.0, 360.0))
         .frame(
             egui::Frame::new()
                 .fill(Color32::from_rgb(26, 30, 41))
