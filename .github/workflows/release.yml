@@ -53,16 +53,9 @@ jobs:
           echo "### PdfCraft v$v (\`${GITHUB_SHA::9}\`)" >>"$GITHUB_STEP_SUMMARY"
 
   windows:
-    name: Windows ${{ matrix.arch }}
+    name: Windows x64
     needs: version
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { arch: x64, target: x86_64-pc-windows-msvc }
-          - { arch: x86, target: i686-pc-windows-msvc }
-          - { arch: arm64, target: aarch64-pc-windows-msvc }
     env:
       PDFCRAFT_VERSION: ${{ needs.version.outputs.version }}
       PDFCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
@@ -76,10 +69,10 @@ jobs:
           path: craft-fonts
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-windows-${{ matrix.arch }}
+          key: release-windows-x64
       - name: Apply version override
         if: inputs.version != ''
         shell: bash
@@ -100,15 +93,15 @@ jobs:
           AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
           CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
           CRAFT_FONTS_REQUIRED: "1"
-        run: ./packaging/windows/package.ps1 -Arch ${{ matrix.arch }}
-      - name: Upload Windows artifacts
+        run: ./packaging/windows/package.ps1 -Arch x64
+      - name: Upload Windows x64 artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-windows-${{ matrix.arch }}
+          name: release-windows-x64
           path: |
             dist/release/*
-            target/${{ matrix.target }}/release/pdfcraft.exe
-            target/${{ matrix.target }}/release/pdfcraft-cli.exe
+            target/x86_64-pc-windows-msvc/release/pdfcraft.exe
+            target/x86_64-pc-windows-msvc/release/pdfcraft-cli.exe
           if-no-files-found: warn
 
   release:
